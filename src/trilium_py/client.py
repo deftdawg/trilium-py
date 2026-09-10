@@ -1,4 +1,5 @@
 import mimetypes
+import json
 import os
 import re
 import string
@@ -1436,6 +1437,18 @@ class ETAPI:
 
         mdFolder = os.path.expandvars(os.path.expanduser(mdFolder))
 
+        # Folder dates exported by our Joplin exporter (_folders.json): plain
+        # directories carry no timestamps, so without this every folder note
+        # stamps import time. A missing/invalid manifest keeps that default.
+        folder_dates: dict = {}
+        try:
+            with open(os.path.join(mdFolder, '_folders.json'), encoding='utf-8') as fh:
+                loaded = json.load(fh)
+                if isinstance(loaded, dict):
+                    folder_dates = loaded
+        except (OSError, ValueError):
+            folder_dates = {}
+
         error_files = {}
         for root, dirs, files in os.walk(mdFolder, topdown=True):
             root_folder_name = os.path.basename(root)
@@ -1474,12 +1487,21 @@ class ETAPI:
                     logger.info(dir_path)
                     rel_path = os.path.relpath(dir_path, start=mdFolder)
                     logger.info(rel_path)
-                    res = self.create_note(
+                    folder_kwargs: dict = dict(
                         parentNoteId=current_parent_note_id,
                         title=name,
                         type="text",
                         content=name,
                     )
+                    entry = folder_dates.get(rel_path)
+                    if isinstance(entry, dict):
+                        if entry.get('created'):
+                            folder_kwargs['dateCreated'], folder_kwargs['utcDateCreated'] = \
+                                _format_front_matter_date(entry['created'])
+                        if importModified and entry.get('updated'):
+                            folder_kwargs['dateModified'], folder_kwargs['utcDateModified'] = \
+                                _format_front_matter_date(entry['updated'])
+                    res = self.create_note(**folder_kwargs)
                     res['note']['noteId']
                     note_tree[rel_path] = res['note']['noteId']
 
