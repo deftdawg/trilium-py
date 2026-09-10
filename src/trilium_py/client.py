@@ -65,6 +65,28 @@ def _parse_front_matter_tags(frontmatter: str) -> list[str]:
     return list(dict.fromkeys(tags))
 
 
+def _format_front_matter_date(raw: str) -> tuple[Optional[str], Optional[str]]:
+    """Normalise a front matter timestamp to Trilium's (local, UTC) pair.
+
+    Accepts the Joplin "Markdown + Front Matter" shape
+    ``YYYY-MM-DD HH:MM:SS[.mmm][Z]``. Returns ``(None, None)`` for anything
+    else so callers can omit the field (preserving Trilium's "now" default).
+    """
+    ts_match = re.match(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(\.\d+)?(Z?)$', raw.strip())
+    if not ts_match:
+        return None, None
+    base, millis, _tz = ts_match.groups()
+    millis = (millis or '.000')[:4].ljust(4, '0')  # ensure exactly .mmm
+    utc_date = f"{base}{millis}Z"
+
+    # Convert to local timezone
+    dt_utc = datetime.strptime(f"{base}{millis}", "%Y-%m-%d %H:%M:%S.%f").replace(
+        tzinfo=timezone.utc)
+    dt_local = dt_utc.astimezone(tzlocal())
+    local_date = dt_local.strftime("%Y-%m-%d %H:%M:%S.") + f"{dt_local.microsecond // 1000:03d}{dt_local.strftime('%z')}"
+    return local_date, utc_date
+
+
 class ETAPI:
     __version__ = __version__
 
@@ -169,7 +191,9 @@ class ETAPI:
             isExpanded: Optional[str] = None,
             noteId: Optional[str] = None,
             branchId: Optional[str] = None,
-            dateCreated: Optional[str] = None
+            dateCreated: Optional[str] = None,
+            dateModified: Optional[str] = None,
+            utcDateModified: Optional[str] = None
     ) -> dict:
         """
         Actually it's create or update,
@@ -186,6 +210,10 @@ class ETAPI:
         :param noteId:
         :param branchId:
         :param dateCreated:
+        :param dateModified: local-time last-modified override (needs a Trilium
+            server with ETAPI dateModified support; omitted when None)
+        :param utcDateModified: UTC last-modified override (needs a Trilium
+            server with ETAPI utcDateModified support; omitted when None)
         :return:
         """
         url = f'{self.server_url}/etapi/create-note'
@@ -202,6 +230,8 @@ class ETAPI:
             "noteId": noteId,
             "branchId": branchId,
             "dateCreated": dateCreated,
+            "dateModified": dateModified,
+            "utcDateModified": utcDateModified,
         }
 
         res = requests.post(url, json=clean_param(params), headers=self.get_header())
@@ -1078,7 +1108,8 @@ class ETAPI:
             image_and_file_as_attachments: bool = True,
             hasFrontMatter: bool = False,
             cleanText: bool = False,
-            importTags: bool = False
+            importTags: bool = False,
+            importModified: bool = False
     ):
         md_file = os.path.abspath(file).replace('\\', '/').replace('//', '/')
         md_full_name = os.path.basename(md_file)
@@ -1094,6 +1125,8 @@ class ETAPI:
 
             utcDateCreated = None
             dateCreated = None
+            dateModified = None
+            utcDateModified = None
             front_matter_tags: list[str] = []
 
             if hasFrontMatter:
@@ -1107,23 +1140,15 @@ class ETAPI:
                     # Extract the 'created' key from FrontMatter
                     created_match = re.search(r'^created:\s*(.+)$', frontmatter, re.MULTILINE)
                     if created_match:
-                        created_raw = created_match.group(1).strip()
-                        # Normalise to millisecond precision: "YYYY-MM-DD HH:MM:SS.mmmZ"
-                        # Input may be "YYYY-MM-DD HH:MM:SSZ" (no millis) or already have them
-                        ts_match = re.match(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(\.\d+)?(Z?)$', created_raw)
-                        if ts_match:
-                            base, millis, tz = ts_match.groups()
-                            millis = (millis or '.000')[:4].ljust(4, '0')  # ensure exactly .mmm
-                            utcDateCreated = f"{base}{millis}Z"
+                        dateCreated, utcDateCreated = _format_front_matter_date(created_match.group(1))
 
-                            # Convert to local timezone
-                            dt_utc = datetime.strptime(f"{base}{millis}", "%Y-%m-%d %H:%M:%S.%f").replace(
-                                tzinfo=timezone.utc)
-                            local_tz = tzlocal()
-                            dt_local = dt_utc.astimezone(local_tz)
-                            utc_offset = dt_local.strftime("%z")  # e.g. "+0900"
-                            dateCreated = dt_local.strftime(
-                                "%Y-%m-%d %H:%M:%S.") + f"{dt_local.microsecond // 1000:03d}{utc_offset}"
+                    # Extract the 'updated' key as the note's last-modified
+                    # date (opt-in: needs a Trilium server with ETAPI
+                    # dateModified/utcDateModified support).
+                    if importModified:
+                        updated_match = re.search(r'^updated:\s*(.+)$', frontmatter, re.MULTILINE)
+                        if updated_match:
+                            dateModified, utcDateModified = _format_front_matter_date(updated_match.group(1))
 
                     # Extract the 'tags' list from FrontMatter (e.g. Joplin
                     # "Markdown + Front Matter" exports) for label import.
@@ -1174,7 +1199,9 @@ class ETAPI:
             title=md_name,
             type="text",
             content=html,
-            dateCreated=dateCreated
+            dateCreated=dateCreated,
+            dateModified=dateModified,
+            utcDateModified=utcDateModified
         )
         note_id = current_note_res['note']['noteId']
         # logger.info(note_id)
@@ -1350,7 +1377,8 @@ class ETAPI:
             parse_math: bool = True,
             hasFrontMatter: Optional[bool] = False,
             cleanText: Optional[bool] = False,
-            importTags: bool = False
+            importTags: bool = False,
+            importModified: bool = False
     ):
         includePattern = includePattern or ['.md']
         ignoreFolder = ignoreFolder or []
@@ -1390,7 +1418,7 @@ class ETAPI:
                     try:
                         self.upload_md_file(file=file_path, parentNoteId=current_parent_note_id, parse_math=parse_math,
                                             hasFrontMatter=hasFrontMatter, cleanText=cleanText,
-                                            importTags=importTags)
+                                            importTags=importTags, importModified=importModified)
                     except Exception as e:
                         error_files[os.path.abspath(file_path)] = e
 
