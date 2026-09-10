@@ -432,6 +432,8 @@ class ETAPI:
             mime: Optional[str] = None,
             dateCreated: Optional[datetime] = None,
             utcDateCreated: Optional[datetime] = None,
+            dateModified: Optional[str] = None,
+            utcDateModified: Optional[str] = None,
     ) -> dict:
         """
         Update note properties.
@@ -443,6 +445,11 @@ class ETAPI:
             mime (str, optional): New MIME type for the note
             dateCreated (datetime, optional): New creation date (local time)
             utcDateCreated (datetime, optional): New creation date (UTC time)
+            dateModified (str, optional): New last-modified date, already in
+                ETAPI local format (e.g. from _format_front_matter_date).
+                Needs a Trilium server with ETAPI dateModified PATCH support.
+            utcDateModified (str, optional): New last-modified date, already in
+                ETAPI UTC format. Takes precedence over dateModified.
 
         Returns:
             dict: Response from the API
@@ -463,6 +470,8 @@ class ETAPI:
             "mime": mime,
             "dateCreated": formatted_date_created,
             "utcDateCreated": formatted_utc_date_created,
+            "dateModified": dateModified,
+            "utcDateModified": utcDateModified,
         }
         res = requests.patch(url, json=clean_param(params), headers=self.get_header())
         return res.json()
@@ -1218,6 +1227,13 @@ class ETAPI:
                 # trilium-py returns the JSON error body instead of raising.
                 logger.warning(f'Failed to create label {tag!r} on note {note_id}: {res}')
 
+        # Whether the HTML was rewritten to point at uploaded attachments.
+        # Any PUT /content re-stamps dateModified to now on the server, so
+        # these flags decide both whether a rewrite PUT is needed at all and
+        # whether importModified dates must be restored afterwards via PATCH.
+        images_rewritten = False
+        files_rewritten = False
+
         if images:
             # images require manually upload and url need to be replaced
             logger.info('found images:')
@@ -1292,6 +1308,7 @@ class ETAPI:
                     logger.info(image_url)
 
                 html = html.replace(image_path, image_url)
+                images_rewritten = True
 
                 # add relation for image
                 self.create_attribute(
@@ -1303,8 +1320,12 @@ class ETAPI:
                     isInheritable=False,
                 )
 
-            # replace note content
-            res = self.update_note_content(note_id, html)
+            # Only rewrite the note when an attachment URL actually replaced a
+            # local path. An unconditional PUT re-stamps dateModified to now on
+            # the server, wiping the dateModified/utcDateModified sent on
+            # create-note (e.g. notes with only external http(s) images).
+            if images_rewritten:
+                res = self.update_note_content(note_id, html)
             # logger.info(res)
 
         # detect files
@@ -1361,9 +1382,26 @@ class ETAPI:
                     file_url = f"#root/{note_id}/{file_note_id}"
 
                 html = html.replace(link, file_url)
+                files_rewritten = True
 
-            # replace note content
+        # A necessary content rewrite (local attachments replaced) re-stamps
+        # dateModified to now on the server. Restore the front matter dates
+        # afterwards when importModified requested them; older servers without
+        # PATCH dateModified support 400 and the note keeps import-time dates.
+        if files_rewritten:
             res = self.update_note_content(note_id, html)
+
+        if (dateModified or utcDateModified) and (images_rewritten or files_rewritten):
+            try:
+                restore = self.patch_note(
+                    noteId=note_id,
+                    dateModified=dateModified,
+                    utcDateModified=utcDateModified,
+                )
+                if not isinstance(restore, dict) or restore.get('code'):
+                    logger.warning(f'Failed to restore last-modified on note {note_id}: {restore}')
+            except Exception as e:
+                logger.warning(f'Failed to restore last-modified on note {note_id}: {e}')
 
         return current_note_res
 
