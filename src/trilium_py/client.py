@@ -31,6 +31,40 @@ from .utils.time_util import (
 from .version import __version__
 
 
+def _parse_front_matter_tags(frontmatter: str) -> list[str]:
+    """Extract a `tags:` string list from a Markdown front matter block.
+
+    Handles the Joplin "Markdown + Front Matter" shape:
+
+        tags:
+          - nix
+          - 'quoted ''tag'''
+
+    Only a block-style list directly under a top-level `tags:` key is read;
+    anything else (inline `tags: []`, missing key, ...) yields [].
+    Single/double-quoted scalars are unquoted. Order is preserved,
+    duplicates are removed.
+    """
+    tags: list[str] = []
+    lines = frontmatter.split('\n')
+    i = 0
+    while i < len(lines):
+        if re.match(r'^tags:\s*$', lines[i]):
+            i += 1
+            while i < len(lines) and re.match(r'^\s+-\s+', lines[i]):
+                item = re.sub(r'^\s+-\s+', '', lines[i]).strip()
+                if len(item) >= 2 and item.startswith("'") and item.endswith("'"):
+                    item = item[1:-1].replace("''", "'")
+                elif len(item) >= 2 and item.startswith('"') and item.endswith('"'):
+                    item = item[1:-1].replace('\\"', '"').replace('\\\\', '\\')
+                if item:
+                    tags.append(item)
+                i += 1
+            break
+        i += 1
+    return list(dict.fromkeys(tags))
+
+
 class ETAPI:
     __version__ = __version__
 
@@ -1043,7 +1077,8 @@ class ETAPI:
             parse_math: bool = True,
             image_and_file_as_attachments: bool = True,
             hasFrontMatter: bool = False,
-            cleanText: bool = False
+            cleanText: bool = False,
+            importTags: bool = False
     ):
         md_file = os.path.abspath(file).replace('\\', '/').replace('//', '/')
         md_full_name = os.path.basename(md_file)
@@ -1059,6 +1094,7 @@ class ETAPI:
 
             utcDateCreated = None
             dateCreated = None
+            front_matter_tags: list[str] = []
 
             if hasFrontMatter:
 
@@ -1088,6 +1124,11 @@ class ETAPI:
                             utc_offset = dt_local.strftime("%z")  # e.g. "+0900"
                             dateCreated = dt_local.strftime(
                                 "%Y-%m-%d %H:%M:%S.") + f"{dt_local.microsecond // 1000:03d}{utc_offset}"
+
+                    # Extract the 'tags' list from FrontMatter (e.g. Joplin
+                    # "Markdown + Front Matter" exports) for label import.
+                    if importTags:
+                        front_matter_tags = _parse_front_matter_tags(frontmatter)
 
             # fix logseq image size format
             logseq_image_pat = r'(\!\[.*\]\(.*\))\{.*?:height.*width.*}'
@@ -1137,6 +1178,18 @@ class ETAPI:
         )
         note_id = current_note_res['note']['noteId']
         # logger.info(note_id)
+
+        # Import front matter tags (e.g. from Joplin) as Trilium labels.
+        for tag in front_matter_tags:
+            try:
+                res = self.create_attribute(
+                    noteId=note_id, type='label', name=tag, value='', isInheritable=False)
+            except Exception as e:
+                logger.warning(f'Failed to create label {tag!r} on note {note_id}: {e}')
+                continue
+            if not isinstance(res, dict) or 'attributeId' not in res:
+                # trilium-py returns the JSON error body instead of raising.
+                logger.warning(f'Failed to create label {tag!r} on note {note_id}: {res}')
 
         if images:
             # images require manually upload and url need to be replaced
@@ -1296,7 +1349,8 @@ class ETAPI:
             ignoreFile: Optional[list[str]] = None,
             parse_math: bool = True,
             hasFrontMatter: Optional[bool] = False,
-            cleanText: Optional[bool] = False
+            cleanText: Optional[bool] = False,
+            importTags: bool = False
     ):
         includePattern = includePattern or ['.md']
         ignoreFolder = ignoreFolder or []
@@ -1335,7 +1389,8 @@ class ETAPI:
                     logger.info(file_path)
                     try:
                         self.upload_md_file(file=file_path, parentNoteId=current_parent_note_id, parse_math=parse_math,
-                                            hasFrontMatter=hasFrontMatter, cleanText=cleanText)
+                                            hasFrontMatter=hasFrontMatter, cleanText=cleanText,
+                                            importTags=importTags)
                     except Exception as e:
                         error_files[os.path.abspath(file_path)] = e
 
