@@ -192,6 +192,7 @@ class ETAPI:
             noteId: Optional[str] = None,
             branchId: Optional[str] = None,
             dateCreated: Optional[str] = None,
+            utcDateCreated: Optional[str] = None,
             dateModified: Optional[str] = None,
             utcDateModified: Optional[str] = None
     ) -> dict:
@@ -209,7 +210,11 @@ class ETAPI:
         :param isExpanded:
         :param noteId:
         :param branchId:
-        :param dateCreated:
+        :param dateCreated: local-time creation override, already in ETAPI
+            local format (e.g. from _format_front_matter_date)
+        :param utcDateCreated: UTC creation override, already in ETAPI UTC
+            format. The server derives one from the other when only one is
+            given; omit both for the default (current datetime).
         :param dateModified: local-time last-modified override (needs a Trilium
             server with ETAPI dateModified support; omitted when None)
         :param utcDateModified: UTC last-modified override (needs a Trilium
@@ -230,6 +235,7 @@ class ETAPI:
             "noteId": noteId,
             "branchId": branchId,
             "dateCreated": dateCreated,
+            "utcDateCreated": utcDateCreated,
             "dateModified": dateModified,
             "utcDateModified": utcDateModified,
         }
@@ -1209,6 +1215,7 @@ class ETAPI:
             type="text",
             content=html,
             dateCreated=dateCreated,
+            utcDateCreated=utcDateCreated,
             dateModified=dateModified,
             utcDateModified=utcDateModified
         )

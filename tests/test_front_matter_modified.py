@@ -62,8 +62,9 @@ class TestUploadMdFileModified(unittest.TestCase):
             sent = self._upload(mock, self._write_note(), importModified=True)
         self.assertEqual(sent['utcDateModified'], '2025-09-08 12:34:56.000Z')
         self.assertRegex(sent['dateModified'], r'\.000[+-]\d{4}$')
-        # created still flows as before
+        # created still flows as before, as a local/UTC pair
         self.assertIn('dateCreated', sent)
+        self.assertEqual(sent['utcDateCreated'], '2025-09-01 08:00:00.000Z')
 
     def test_modified_omitted_by_default(self):
         with requests_mock.Mocker() as mock:
@@ -71,6 +72,7 @@ class TestUploadMdFileModified(unittest.TestCase):
         self.assertNotIn('dateModified', sent)
         self.assertNotIn('utcDateModified', sent)
         self.assertIn('dateCreated', sent)
+        self.assertIn('utcDateCreated', sent)
 
     def test_unparseable_updated_is_omitted(self):
         bad = self.NOTE.replace('updated: 2025-09-08 12:34:56Z', 'updated: someday')
