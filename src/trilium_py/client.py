@@ -88,6 +88,26 @@ def _format_front_matter_date(raw: str) -> tuple[Optional[str], Optional[str]]:
     return local_date, utc_date
 
 
+def _read_front_matter_modified(md_file: str) -> tuple[Optional[str], Optional[str]]:
+    """(dateModified, utcDateModified) from a Markdown front matter `updated:` key.
+
+    Returns ``(None, None)`` when the file cannot be read or holds no
+    parseable value, so callers can skip the date restore.
+    """
+    try:
+        with open(md_file, encoding='utf-8') as fh:
+            content = fh.read()
+    except OSError:
+        return None, None
+    frontmatter_match = re.match(r'^---\n(.*?)\n---\n', content, re.DOTALL)
+    if not frontmatter_match:
+        return None, None
+    updated_match = re.search(r'^updated:\s*(.+)$', frontmatter_match.group(1), re.MULTILINE)
+    if not updated_match:
+        return None, None
+    return _format_front_matter_date(updated_match.group(1))
+
+
 class ETAPI:
     __version__ = __version__
 
@@ -1125,7 +1145,8 @@ class ETAPI:
             hasFrontMatter: bool = False,
             cleanText: bool = False,
             importTags: bool = False,
-            importModified: bool = False
+            importModified: bool = False,
+            skipMdFileLinks: bool = False
     ):
         md_file = os.path.abspath(file).replace('\\', '/').replace('//', '/')
         md_full_name = os.path.basename(md_file)
@@ -1346,6 +1367,11 @@ class ETAPI:
             if link.startswith(('http:', 'https:')):
                 # skip online link
                 continue
+            if skipMdFileLinks and urllib.parse.unquote(link.split('#', 1)[0]).lower().endswith('.md'):
+                # Note-to-note link: the folder-level second pass resolves
+                # these to internal links once every note exists. Never
+                # snapshot a note's source as a file attachment.
+                continue
             if os.path.exists(link):
                 # absolute file path
                 file_path = link
@@ -1424,7 +1450,8 @@ class ETAPI:
             hasFrontMatter: Optional[bool] = False,
             cleanText: Optional[bool] = False,
             importTags: bool = False,
-            importModified: bool = False
+            importModified: bool = False,
+            resolveMdLinks: bool = False
     ):
         includePattern = includePattern or ['.md']
         ignoreFolder = ignoreFolder or []
@@ -1450,6 +1477,9 @@ class ETAPI:
             folder_dates = {}
 
         error_files = {}
+        # Source-md relpath -> created Trilium noteId, for the second pass
+        # that resolves note-to-note links once every target exists.
+        note_map: dict[str, str] = {}
         for root, dirs, files in os.walk(mdFolder, topdown=True):
             root_folder_name = os.path.basename(root)
 
@@ -1474,9 +1504,14 @@ class ETAPI:
                     file_path = os.path.join(root, name)
                     logger.info(file_path)
                     try:
-                        self.upload_md_file(file=file_path, parentNoteId=current_parent_note_id, parse_math=parse_math,
-                                            hasFrontMatter=hasFrontMatter, cleanText=cleanText,
-                                            importTags=importTags, importModified=importModified)
+                        up_res = self.upload_md_file(file=file_path, parentNoteId=current_parent_note_id, parse_math=parse_math,
+                                                     hasFrontMatter=hasFrontMatter, cleanText=cleanText,
+                                                     importTags=importTags, importModified=importModified,
+                                                     skipMdFileLinks=resolveMdLinks)
+                        if resolveMdLinks and isinstance(up_res, dict):
+                            created_id = up_res.get('note', {}).get('noteId') if isinstance(up_res.get('note'), dict) else None
+                            if created_id:
+                                note_map[os.path.normpath(os.path.relpath(file_path, start=mdFolder))] = created_id
                     except Exception as e:
                         error_files[os.path.abspath(file_path)] = e
 
@@ -1487,13 +1522,18 @@ class ETAPI:
                     logger.info(dir_path)
                     rel_path = os.path.relpath(dir_path, start=mdFolder)
                     logger.info(rel_path)
+                    # Joplin notebook emoji, appended so title sort order is
+                    # unaffected (Trilium has icon fonts, not emoji icons).
+                    title = name
+                    entry = folder_dates.get(rel_path)
+                    if isinstance(entry, dict) and entry.get('icon'):
+                        title = f"{title} {entry['icon']}"
                     folder_kwargs: dict = dict(
                         parentNoteId=current_parent_note_id,
-                        title=name,
+                        title=title,
                         type="text",
                         content=name,
                     )
-                    entry = folder_dates.get(rel_path)
                     if isinstance(entry, dict):
                         if entry.get('created'):
                             folder_kwargs['dateCreated'], folder_kwargs['utcDateCreated'] = \
@@ -1504,6 +1544,56 @@ class ETAPI:
                     res = self.create_note(**folder_kwargs)
                     res['note']['noteId']
                     note_tree[rel_path] = res['note']['noteId']
+
+        if resolveMdLinks and note_map:
+            # Second pass: every target now exists, so `.md` hrefs left alone
+            # above can become internal links. Cycles need no special casing:
+            # nothing is resolved until the map is complete.
+            href_re = re.compile(r'<a href="(.*?)">(.*?)</a>')
+            md_link_re = re.compile(r'(\]\(|href="|\]:)\s*\S*\.md', re.IGNORECASE)
+            for md_rel, note_id in note_map.items():
+                src_file = os.path.join(mdFolder, md_rel)
+                try:
+                    with open(src_file, encoding='utf-8') as fh:
+                        if not md_link_re.search(fh.read()):
+                            continue
+                except OSError:
+                    continue
+                try:
+                    html = self.get_note_content(note_id)
+                except Exception as e:
+                    logger.warning(f'Failed to read note {note_id} for link resolving: {e}')
+                    continue
+                new_html = html
+                for href, _text in href_re.findall(html):
+                    if href.startswith(('http:', 'https:', '#', 'api/', 'data:')):
+                        continue
+                    target = urllib.parse.unquote(href.split('#', 1)[0])
+                    if not target.lower().endswith('.md'):
+                        continue
+                    resolved = os.path.normpath(os.path.join(os.path.dirname(md_rel), target))
+                    target_id = note_map.get(resolved)
+                    if not target_id:
+                        continue
+                    new_html = new_html.replace(href, f'#root/{target_id}')
+                if new_html == html:
+                    continue
+                if not self.update_note_content(note_id, new_html):
+                    logger.warning(f'Failed to rewrite note links on note {note_id}')
+                    continue
+                if importModified:
+                    dateModified, utcDateModified = _read_front_matter_modified(src_file)
+                    if dateModified or utcDateModified:
+                        try:
+                            restore = self.patch_note(
+                                noteId=note_id,
+                                dateModified=dateModified,
+                                utcDateModified=utcDateModified,
+                            )
+                            if not isinstance(restore, dict) or restore.get('code'):
+                                logger.warning(f'Failed to restore last-modified on note {note_id}: {restore}')
+                        except Exception as e:
+                            logger.warning(f'Failed to restore last-modified on note {note_id}: {e}')
 
         # count how many errors
         if error_files:

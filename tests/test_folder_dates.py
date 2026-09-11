@@ -83,6 +83,26 @@ class TestUploadMdFolderDates(unittest.TestCase):
                     'dateModified', 'utcDateModified'):
             self.assertNotIn(key, folder)
 
+    def test_folder_icon_appended_to_title(self):
+        manifest = {'sub': {'created': '2020-03-13 19:05:04Z',
+                            'updated': '2022-07-05 02:35:39Z',
+                            'icon': '🤖'}}
+        tmpdir = make_tree(manifest)
+        self.addCleanup(shutil.rmtree, tmpdir, True)
+        with requests_mock.Mocker() as mock:
+            self._upload(mock, tmpdir, importModified=True)
+        titles = [p['title'] for p in creates(mock)]
+        self.assertIn('sub 🤖', titles)
+
+    def test_folder_without_icon_keeps_plain_title(self):
+        tmpdir = make_tree(self.MANIFEST)
+        self.addCleanup(shutil.rmtree, tmpdir, True)
+        with requests_mock.Mocker() as mock:
+            self._upload(mock, tmpdir, importModified=True)
+        titles = [p['title'] for p in creates(mock)]
+        self.assertIn('sub', titles)
+        self.assertNotIn('sub ', titles)
+
 
 if __name__ == '__main__':
     unittest.main()
