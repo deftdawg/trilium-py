@@ -66,6 +66,26 @@ def _parse_front_matter_tags(frontmatter: str) -> list[str]:
     return list(dict.fromkeys(tags))
 
 
+def _parse_front_matter_title(frontmatter: str) -> Optional[str]:
+    """Extract the `title:` value from a Markdown front matter block.
+
+    Handles the Joplin "Markdown + Front Matter" shapes ``title: plain``,
+    ``title: 'single ''quoted'''`` and ``title: "double \\"quoted\\""``.
+    Returns ``None`` when absent or empty so callers can fall back to the
+    file name (which is filesystem-sanitised and truncated).
+    """
+    match = re.search(r'^title:[ \t]*(.+)$', frontmatter, re.MULTILINE)
+    if not match:
+        return None
+    item = match.group(1).strip()
+    if len(item) >= 2 and item.startswith("'") and item.endswith("'"):
+        item = item[1:-1].replace("''", "'")
+    elif len(item) >= 2 and item.startswith('"') and item.endswith('"'):
+        item = item[1:-1].replace('\\"', '"').replace('\\\\', '\\')
+    item = item.strip()
+    return item or None
+
+
 def _format_front_matter_date(raw: str) -> tuple[Optional[str], Optional[str]]:
     """Normalise a front matter timestamp to Trilium's (local, UTC) pair.
 
@@ -1192,6 +1212,12 @@ class ETAPI:
                     if importTags:
                         front_matter_tags = _parse_front_matter_tags(frontmatter)
 
+                    # The file name is filesystem-sanitised (`/` `?` -> `_`,
+                    # truncated), so prefer the real title when present.
+                    front_matter_title = _parse_front_matter_title(frontmatter)
+                    if front_matter_title:
+                        md_name = front_matter_title
+
             # fix logseq image size format
             logseq_image_pat = r'(\!\[.*\]\(.*\))\{.*?:height.*width.*}'
             content = re.sub(logseq_image_pat, r'\1', content)
@@ -1522,12 +1548,16 @@ class ETAPI:
                     logger.info(dir_path)
                     rel_path = os.path.relpath(dir_path, start=mdFolder)
                     logger.info(rel_path)
-                    # Joplin notebook emoji, appended so title sort order is
-                    # unaffected (Trilium has icon fonts, not emoji icons).
+                    # Directory names are filesystem-sanitised; prefer the
+                    # real notebook title (and its Joplin emoji, appended so
+                    # title sort order is unaffected).
                     title = name
                     entry = folder_dates.get(rel_path)
-                    if isinstance(entry, dict) and entry.get('icon'):
-                        title = f"{title} {entry['icon']}"
+                    if isinstance(entry, dict):
+                        if entry.get('title'):
+                            title = entry['title']
+                        if entry.get('icon'):
+                            title = f"{title} {entry['icon']}"
                     folder_kwargs: dict = dict(
                         parentNoteId=current_parent_note_id,
                         title=title,

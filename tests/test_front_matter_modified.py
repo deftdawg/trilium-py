@@ -4,12 +4,33 @@ Runs fully offline with requests_mock — no Trilium server needed.
 """
 import json
 import os
+import shutil
 import tempfile
 import unittest
 
 import requests_mock
 
-from trilium_py.client import ETAPI, _format_front_matter_date
+from trilium_py.client import ETAPI, _format_front_matter_date, _parse_front_matter_title
+
+
+class TestParseFrontMatterTitle(unittest.TestCase):
+    def test_plain(self):
+        self.assertEqual(_parse_front_matter_title('title: plain title\n'), 'plain title')
+
+    def test_single_quoted(self):
+        self.assertEqual(
+            _parse_front_matter_title("title: 'What/Why?'\n"), 'What/Why?')
+        self.assertEqual(
+            _parse_front_matter_title("title: 'it''s'\n"), "it's")
+
+    def test_double_quoted(self):
+        self.assertEqual(
+            _parse_front_matter_title('title: "say \\"hi\\""\n'), 'say "hi"')
+
+    def test_missing_or_empty(self):
+        self.assertIsNone(_parse_front_matter_title('created: x\n'))
+        self.assertIsNone(_parse_front_matter_title('title: \n'))
+        self.assertIsNone(_parse_front_matter_title(''))
 
 
 class TestFormatFrontMatterDate(unittest.TestCase):
@@ -28,6 +49,42 @@ class TestFormatFrontMatterDate(unittest.TestCase):
         self.assertEqual(_format_front_matter_date('yesterday'), (None, None))
         self.assertEqual(_format_front_matter_date('2025-09-08'), (None, None))
         self.assertEqual(_format_front_matter_date(''), (None, None))
+
+
+class TestUploadMdFileTitle(unittest.TestCase):
+    def _write_named(self, dirname, filename, body):
+        path = os.path.join(dirname, filename)
+        with open(path, 'w', encoding='utf-8') as fh:
+            fh.write(body)
+        return path
+
+    def _create_payload(self, mock, path, **kwargs):
+        mock.post('http://bogus:8080/etapi/create-note',
+                  json={'note': {'noteId': 'n1'}})
+        ea = ETAPI('http://bogus:8080', 'bogus')
+        ea.upload_md_file(file=path, parentNoteId='root',
+                          parse_math=False, hasFrontMatter=True, **kwargs)
+        return json.loads(mock.request_history[0].text)
+
+    def test_front_matter_title_beats_sanitised_filename(self):
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmpdir, True)
+        path = self._write_named(
+            tmpdir, 'What_Why_.md',
+            '---\ntitle: \'What/Why?\'\ncreated: 2025-09-01 08:00:00Z\n---\n\nBody.\n')
+        with requests_mock.Mocker() as mock:
+            sent = self._create_payload(mock, path)
+        self.assertEqual(sent['title'], 'What/Why?')
+
+    def test_missing_title_falls_back_to_filename(self):
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmpdir, True)
+        path = self._write_named(
+            tmpdir, 'plain.md',
+            '---\ncreated: 2025-09-01 08:00:00Z\n---\n\nBody.\n')
+        with requests_mock.Mocker() as mock:
+            sent = self._create_payload(mock, path)
+        self.assertEqual(sent['title'], 'plain')
 
 
 class TestUploadMdFileModified(unittest.TestCase):

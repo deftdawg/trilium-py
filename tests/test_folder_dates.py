@@ -103,6 +103,24 @@ class TestUploadMdFolderDates(unittest.TestCase):
         self.assertIn('sub', titles)
         self.assertNotIn('sub ', titles)
 
+    def test_folder_real_title_beats_sanitised_dirname(self):
+        manifest = {'LLM _ ML _ AI': {'title': 'LLM / ML / AI',
+                                      'created': '2023-05-31 14:25:40Z',
+                                      'updated': '2023-05-31 14:25:40Z',
+                                      'icon': '🧠'}}
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmpdir, True)
+        os.mkdir(os.path.join(tmpdir, 'LLM _ ML _ AI'))
+        with open(os.path.join(tmpdir, 'LLM _ ML _ AI', 'note.md'),
+                  'w', encoding='utf-8') as fh:
+            fh.write(NOTE)
+        with open(os.path.join(tmpdir, '_folders.json'), 'w', encoding='utf-8') as fh:
+            json.dump(manifest, fh)
+        with requests_mock.Mocker() as mock:
+            self._upload(mock, tmpdir, importModified=True)
+        titles = [p['title'] for p in creates(mock)]
+        self.assertIn('LLM / ML / AI 🧠', titles)
+
 
 if __name__ == '__main__':
     unittest.main()
